@@ -7,31 +7,32 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
                MatrixMemoryAllocator matrix_memory_allocator) {
   assert(keys.size() == values.size());
 
-  // Key optimization: maintain running concatenation of keys and values
-  Matrix* k_concat = nullptr;
-  Matrix* v_concat = nullptr;
-
   for (size_t i = 0; i < keys.size(); ++i) {
     auto current_query = rater.GetNextQuery();
 
-    // Incrementally build K and V concatenations
-    if (i == 0) {
-      k_concat = matrix_memory_allocator.Allocate("k_concat");
-      v_concat = matrix_memory_allocator.Allocate("v_concat");
-      gpu_sim.Copy(keys[i], k_concat, kInGpuHbm);
-      gpu_sim.Copy(values[i], v_concat, kInGpuHbm);
-    } else {
-      Matrix* k_temp = matrix_memory_allocator.Allocate("k_temp");
-      Matrix* v_temp = matrix_memory_allocator.Allocate("v_temp");
-      gpu_sim.Concat(k_concat, keys[i], k_temp, 0, kInGpuHbm);
-      gpu_sim.Concat(v_concat, values[i], v_temp, 0, kInGpuHbm);
-      gpu_sim.ReleaseMatrix(k_concat);
-      gpu_sim.ReleaseMatrix(v_concat);
-      k_concat = k_temp;
-      v_concat = v_temp;
+    // Build K and V concatenated in HBM first
+    Matrix* k_concat = nullptr;
+    Matrix* v_concat = nullptr;
+
+    for (size_t j = 0; j <= i; ++j) {
+      if (j == 0) {
+        k_concat = matrix_memory_allocator.Allocate("k_concat");
+        v_concat = matrix_memory_allocator.Allocate("v_concat");
+        gpu_sim.Copy(keys[j], k_concat, kInGpuHbm);
+        gpu_sim.Copy(values[j], v_concat, kInGpuHbm);
+      } else {
+        Matrix* k_temp = matrix_memory_allocator.Allocate("k_temp");
+        Matrix* v_temp = matrix_memory_allocator.Allocate("v_temp");
+        gpu_sim.Concat(k_concat, keys[j], k_temp, 0, kInGpuHbm);
+        gpu_sim.Concat(v_concat, values[j], v_temp, 0, kInGpuHbm);
+        gpu_sim.ReleaseMatrix(k_concat);
+        gpu_sim.ReleaseMatrix(v_concat);
+        k_concat = k_temp;
+        v_concat = v_temp;
+      }
     }
 
-    // Move everything to SRAM once
+    // Move to SRAM
     gpu_sim.MoveMatrixToSharedMem(current_query);
     gpu_sim.MoveMatrixToSharedMem(k_concat);
     gpu_sim.MoveMatrixToSharedMem(v_concat);
@@ -86,12 +87,9 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
     // Move result to HBM
     gpu_sim.MoveMatrixToGpuHbm(result);
 
-    // Move k_concat and v_concat back to HBM for next iteration (they are modified by Transpose)
-    gpu_sim.Transpose(k_concat, kInSharedMemory); // Transpose back to original form
-    gpu_sim.MoveMatrixToGpuHbm(k_concat);
-    gpu_sim.MoveMatrixToGpuHbm(v_concat);
-
-    // Release temporary matrices
+    // Release matrices
+    gpu_sim.ReleaseMatrix(k_concat);
+    gpu_sim.ReleaseMatrix(v_concat);
     gpu_sim.ReleaseMatrix(softmax_qk);
 
     gpu_sim.Run(false, &matrix_memory_allocator);
